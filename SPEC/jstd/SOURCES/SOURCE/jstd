@@ -1,0 +1,539 @@
+#!/bin/bash
+### BEGIN INIT INFO
+# Provides:     jstd
+# Required-Start: $local_fs $network $remote_fs $fullduplex $apache
+# Required-Stop:
+# Default-Start: 3 5
+# Default-Stop:
+# Description:  Start Java Standalone
+### END INIT INFO
+
+
+
+#########################################################################
+
+# Configs                                                               #
+
+#########################################################################
+export PATH="/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
+export LANG="en_US"
+export LC_ALL="en_US"
+
+VER="1.0"
+ME="${0##*/}"
+
+CONFIG_PATH="/opt/standalone"
+# This variables must be in alphabetical order and be a space in finish
+CONFIG_VARS="JAVA_APPS_CONSOLE JAVA_APPS_OPTS JAVA_APPS_HOME JAVA_OPTS JAVA_HOME  JAVA_USER JAVA_APPS_CLASSPATH JAVA_APPS_HOME"
+
+# This variable is used to print a log
+VARS="PATH LANG LC_ALL ${CONFIG_VARS}"
+PID_PATH="/var/run"
+SERVERS="server1 server2"
+
+
+usage(){
+	echo "Usage: ${ME} {start|stop|restart|status|check|list|help|version} [Java Standalone]"
+}
+
+help_config(){
+	echo "The Java Standalone's config file must be located in '${CONFIG_PATH}/<apps_name>/<apps_name>.conf' diretory"
+	echo "  and your name must terminate with .conf."
+	echo "Ex: ${CONFIG_PATH}/standalone/apps/apps.conf"
+	echo ""
+	echo ""
+	echo "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%"
+	echo "%%%%% Java Standalone's config file example %%%%%"
+	echo "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%"
+	echo "# This is a commentary"
+	echo ""
+	echo "JAVA_APPS_HOME          =/opt/standalone/apps"
+	echo "JAVA_USER               =nobody"
+	echo "JAVA_APPS_CONSOLE       =/var/log/<appname>"
+	echo "JAVA_HOME               =/usr/java/jre1.6.0_24"
+	echo "JAVA_OPTS      	        =-server -Xms128M -Xmx128M -Duser.timezone=Brazil/East"
+	echo "JAVA_APPS_OPTS          =-Dlog4j.configuration=file:<path config log4j>"
+	echo "JAVA_APPS_BIND          =URL_app;bind"
+	echo "JAVA_APPS_CLASSPATH     =<lista de arquivos do classpath>"
+	echo "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%"
+	echo "%%%%% Java Sstandalone's config file example %%%%%"
+	echo "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%"
+}
+
+function echo_sucess(){
+	tag="${1}"
+	msg="${2}"
+	[[ "${tag}" == "" ]] && tag="SUCESS"
+	echo -en '\033[60G'
+	echo -n '['
+	echo -en '\033[0;32m'
+	echo -n "${tag}"
+	echo -en '\033[0;39m'
+	echo ']'
+	[[ "${msg}" != "" ]] && echo -en "${msg}"
+}
+
+function echo_failure(){
+	tag="${1}"
+	msg="${2}"
+	[[ "${tag}" == "" ]] && tag="FAILURE"
+	echo -en '\033[60G'
+	echo -n '['
+	echo -en '\033[0;31m'
+	echo -n "${tag}"
+	echo -en '\033[0;39m'
+	echo ']'
+	[[ "${msg}" != "" ]] && echo -en "${msg}"
+}
+
+function echo_warning(){
+	tag="${1}"
+	msg="${2}"
+	[[ "${tag}" == "" ]] && tag="WARNING"
+	echo -en '\033[60G'
+	echo -n '['
+	echo -en '\033[0;33m'
+	echo -n "${tag}"
+	echo -en '\033[0;39m'
+	echo ']'
+	[[ "${msg}" != "" ]] && echo -en "${msg}"
+}
+
+function echo_user(){
+	user="${1}"
+	msg="${2}"
+	cronolog="${3}"
+	su -m "${user}" -c 'echo "`date "+%H:%M:%S,%N"`  '"${msg}"'" | '"${cronolog}"
+}
+
+function main(){
+	if [[ "`id -u 2>/dev/null`" != "0" ]]; then
+		echo "${ME}: You must be root."
+		return 2
+	fi
+
+	ls "${CONFIG_PATH}/" >/dev/null 2>&1
+	if [[ "${?}" != "0" ]]; then
+		echo "${ME}: Config path '${CONFIG_PATH}' don't exist or don't accessible."
+		return 2
+	fi
+
+	touch "${PID_PATH}/ " >/dev/null 2>&1
+	if [[ "${?}" != "0" ]]; then
+		echo "${ME}: Pid path '${PID_PATH}' don't exist or don't writable."
+		return 2
+	fi
+	rm -f "${PID_PATH}/ " >/dev/null 2>&1
+
+	SERVERS=""
+	for c in "${CONFIG_PATH}/"*; do
+		SERVERS="${SERVERS}""'${c##*/}' "
+	done
+}
+
+function readConf(){
+	s="${1}"
+	s_msg=""
+	if [[ "${s}" == "" ]]; then
+		s_msg="${ME}: ERROR - Anything Java Standalone especified to read conf.\n${s_msg}"
+		echo_failure "" "${s_msg}"; return 2
+	fi
+
+	# Verifying if file exist
+	s_conf="${CONFIG_PATH}/${s}/${s}.conf"
+	if [[ ! -f "${s_conf}" ]];then
+		s_msg="${ME}: ERROR - The Java Standalone's config '${s_conf}' don't exist.\n${s_msg}"
+		echo_failure "" "${s_msg}"; return 2
+	fi
+
+	# Processing config file
+	if [[ -r  "${s_conf}" ]]; then
+		# Importing configs
+
+		for v in ${CONFIG_VARS}; do
+			vv="`sed -ne 's|^[[:space:]]*\('"${v}"'\)[[:space:]]*=[[:space:]]*\(.*\)[[:space:]]*$|\1=\2|gp' "${s_conf}" 2>/dev/null`"
+			if [[ "${vv}" == ""  ]]; then
+				s_msg="${ME}: ERROR - The variable '${v}' not found in config file.\n${s_msg}"
+                                echo_failure "" "${s_msg}"; return 2
+			fi
+			export "${vv}" >/dev/null 2>&1
+			if [[ "${?}" != 0 ]]; then
+				s_msg="${ME}: ERROR - The variable '${v}' can't be set, please check config file.\n${s_msg}"
+				echo_failure "" "${s_msg}"; return 2
+			fi
+		done
+
+		JAVA="${JAVA_HOME}/bin/java"
+		if [[ "${JAVA_APPS_CLASSPATH}" == "" ]]; then
+			lf=`find -H ${JAVA_APPS_HOME}/ -maxdepth 3 -name \*.zip -or -name \*.jar`
+			JAVA_APPS_CLASSPATH=`echo ${lf} |tr ' ' ':'`
+		fi
+
+		JAVA_OPTS="${JAVA_OPTS} -Dprogram.name=${ME}"
+		JAVA_APPS="${s}"
+		JAVA_APPS_CONF="${CONFIG_PATH}/${s}"
+		CRONOLOG="cronolog -p '1 day' '${JAVA_APPS_CONSOLE}/stdout.log.%Y-%m-%d'"
+		export JAVA JAVA_APPS_CLASSPATH JAVA_OPTS CRONOLOG JAVA_APPS CONFIG_PATH JAVA_APPS_CONF
+		VARS="${VARS} JAVA CRONOLOG JAVA_APPS CONFIG_PATH JAVA_APPS_CONF JAVA_APPS_CLASSPATH"
+	else
+		s_msg="${ME}: ERROR - The Java Standalone's config '${s_conf}' can't be read.\n${s_msg}"
+		echo_failure "" "${s_msg}"; return 2
+	fi
+
+	return 0
+
+}
+
+function validateConf(){
+	s_msg="${s_msg}"
+	if [[ ! -d "${JAVA_APPS_CONSOLE}" ]];then
+		mkdir -p "${JAVA_APPS_CONSOLE}" >/dev/null 2>&1
+		chown "${JAVA_USER}" "${JAVA_APPS_CONSOLE}" >/dev/null 2>&1 
+		s_msg="${ME}: WARNI - JAVA_APPS_CONSOLE doesnt exist, created.\n${s_msg}"
+	fi
+
+	
+	for d in JAVA_HOME JAVA_APPS_HOME JAVA_APPS_CONSOLE JAVA_APPS_CLASSPATH; do
+		eval dd=\"\${"${d}"}\"
+		if [[ ! -d "${dd}" ]]; then
+			s_msg="${ME}: ERROR - '${d}' isn't a directory '${dd}'.\n${s_msg}"
+			echo_failure "" "${s_msg}"; return 2
+		fi
+	done
+
+	"${JAVA}" -version >/dev/null 2>&1
+	if [[ "${?}" != "0" ]]; then
+		s_msg="${ME}: ERROR - In 'JAVA_HOME' a binary '${JAVA}' can't be run.\n${s_msg}"
+		echo_failure "" "${s_msg}"; return 2
+	fi
+
+	id -u "${JAVA_USER}" >/dev/null 2>&1
+	if [[ "${?}" != "0" ]]; then
+		s_msg="${ME}: ERROR - 'JAVA_USER' reference a invalid user '${JAVA_USER}'.\n${s_msg}"
+		echo_failure "" "${s_msg}"
+		return 2
+	fi
+
+	for d in JAVA_APPS_CONSOLE JAVA_APPS_HOME; do
+		eval export dd=\"\${"${d}"}\"
+		rm -f "${dd}/ " >>/dev/null 2>&1
+		su -m "${JAVA_USER}" -c 'touch "${dd}/ "'  >>/dev/null 2>&1
+		if [[ "${?}" != "0" ]]; then
+			s_msg="${ME}: ERROR - '${d}=${dd}' can't be found or write of user '${JAVA_USER}'.\n${s_msg}"
+			echo_failure "" "${s_msg}"
+			return 2
+		fi
+		rm -f "${dd}/ " >>/dev/null 2>&1
+	done
+	return 0
+
+}
+
+function start(){
+	s="${1}"
+	echo -n "Starting  [${s}]:"
+	readConf "${1}"
+	[[ "${?}" == "2" ]] && return 2
+	[[ "${?}" == "2" ]] && return 2
+	s_msg="${s_msg}"
+
+	# Verifying pid file
+	s_pid_file="${PID_PATH}/${s}.pid"
+	if [[ -f "${s_pid_file}" ]]; then
+		s_pid="`cat "${s_pid_file}" 2>> /dev/null`"
+		if [[ "${?}" != "0" ]]; then
+			s_msg="${ME}: ERROR - Pid file '${s_pid_file}' can't be read.\n${s_msg}"
+			echo_failure "" "${s_msg}"; return 2
+		fi
+		
+		if [[ "${s_pid}" == "" ]]; then
+			s_msg="${ME}: WARNI - Pid file '${s_pid_file}' exist but is empty.\n${s_msg}"
+		elif [[ ! -d "/proc/${s_pid}" ]]; then
+			s_msg="${ME}: WARNI - The Jboss Server '${s}' isn't stopped properly.\n${s_msg}"
+		else
+			s_msg="${ME}: ERROR - The Jboss Server '${s}' is already running, pid=${s_pid}.\n${s_msg}"
+			echo_failure "" "${s_msg}"; return 2
+		fi
+	fi
+
+	# Creating or reconfiguring a pid file
+	install -m 644 -o "${JAVA_USER}" -g root /dev/null "${s_pid_file}" >/dev/null 2>&1
+	if [[ "${?}" != "0" ]]; then
+		s_msg="${ME}: ERROR - Unable to create or reconfigure pid file '${s_pid_file}'.\n${s_msg}"
+		echo_failure "" "${s_msg}"; return 2
+	fi
+
+	# Starting aplication
+	echo_user "${JAVA_USER}" "" "${CRONOLOG}"
+	echo_user "${JAVA_USER}" "----------------------------------------------" "${CRONOLOG}"
+	echo_user "${JAVA_USER}" "Starting Java Standalone ${CONFIG_PATH}/${s}/${s}.conf" "${CRONOLOG}"
+
+	for v in ${VARS}; do
+		echo_user "${JAVA_USER}" "${v}=\${"${v}"}" "${CRONOLOG}"
+	done
+
+	echo_user "${JAVA_USER}" "----------------------------------------------" "${CRONOLOG}"
+	echo_user "${JAVA_USER}" "" "${CRONOLOG}"
+
+	su -m "${JAVA_USER}" -c '{ { cd "${JAVA_APPS_CONSOLE}"; \
+							${JAVA} ${JAVA_OPTS} -classpath ${JAVA_APPS_CLASSPATH} ${JAVA_APPS_OPTS} & }; \
+							echo -n "${!}" > '"${s_pid_file}"'; } 2>&1 | '"${CRONOLOG}"' >/dev/null 2>&1  &'
+	sleep 2
+
+	s_pid="`cat "${s_pid_file}" 2>/dev/null`"
+	if [[ "${?}" != "0" ]]; then
+		rm -f "${s_pid_file}" >/dev/null 2>&1
+		s_msg="${ME}: ERROR - Pid file '${s_pid_file}' can't be read.\n${s_msg}"
+		echo_failure "" "${s_msg}"; return 2
+	fi
+
+	if [[ -d "/proc/${s_pid}" && "${s_pid}" != "" ]]; then
+		if [[ "${s_msg}" == "" ]]; then
+			echo_sucess "STARTED" "${s_msg}"; return 0
+		else
+			echo_warning "STARTED" "${s_msg}"; return 1
+		fi
+	else
+		rm -f "${s_pid_file}" >/dev/null 2>&1
+		s_msg="${ME}: ERROR - I can't start Java Standalone [${s}].\n${s_msg}"
+		echo_failure "" "${s_msg}"; return 2
+	fi
+}
+
+function stop(){
+	s="${1}"
+	s_msg=""
+	echo -n "Stopping Java Standalone [${s}]:"
+
+	if [[ "${s}" == "" ]]; then
+                s_msg="${ME}: ERROR - Anything Jboss Server especified to stop.\n${s_msg}"
+                echo_failure "" "${s_msg}"; return 2
+        fi
+
+        # Verifying if file exist
+	s_conf="${CONFIG_PATH}/${s}/${s}.conf"
+	if [[ ! -f "${s_conf}" ]];then
+                s_msg="${ME}: ERROR - The Java Standalone's config '${s_conf}' don't exist.\n${s_msg}"
+                echo_failure "" "${s_msg}"; return 2
+        fi
+
+	# Verifying pid file
+
+	s_pid_file="${PID_PATH}/${s}.pid"
+	if [[ ! -f "${s_pid_file}" ]]; then
+		s_msg="${ME}: WARNI - The Java Standalone '${s}' isn't running.\n${s_msg}"
+		echo_failure "" "${s_msg}"; return 1
+	else
+		s_pid="`cat "${s_pid_file}" 2>> /dev/null`"
+		if  [[ "${?}" != "0" ]]; then
+			s_msg="${ME}: ERROR - Pid file '${s_pid_file}' can't be read or found.\n${s_msg}"
+			echo_failure "" "${s_msg}"; return 2
+		fi
+
+		if [[ "${s_pid}" == "" ]]; then
+			s_msg="${ME}: WARNI - Pid file '${s_pid_file}' exist but is empty, removing...\n${s_msg}"
+			rm -rf "${s_pid_file}" >/dev/null 2>&1
+			echo_failure "" "${s_msg}"; return 1
+		elif [[ ! -d "/proc/${s_pid}" ]]; then
+			s_msg="${ME}: WARNI - The Java Standalone '${s}' isn't stopped properly.\n${s_msg}"
+			s_msg="${ME}: ERROR - The Java Standalone '${s}' isn't running, removing pid_file...\n${s_msg}"
+			rm -rf "${s_pid_file}" >/dev/null 2>&1
+			echo_failure "" "${s_msg}"; return 1
+		fi
+	fi
+
+	for t in 1 2 3 4 5 6 7 8 9 10 11 12 13; do 
+		echo -n '. '
+		if [[ ! -d "/proc/${s_pid}" ]]; then
+			rm -rf "${s_pid_file}" >/dev/null 2>&1
+			if [[ "${s_msg}" == "" ]]; then
+				echo_sucess "STOPPED" "${s_msg}"; return 0
+			else
+				echo_warning "STOPPED" "${s_msg}"; return 0
+			fi
+		fi
+		kill -TERM "${s_pid}" >>/dev/null 2>&1
+		sleep 2
+	done
+
+	s_msg="${ME}: ERROR - The Java Standalone'${s}' is taking to stop."
+	echo_failure "" "${s_msg}"
+	return 2
+
+}
+
+function status(){
+	s="${1}"
+	s_msg=""
+	echo -n "Status of Java Standalone [${s}]:"
+	if [[ "${s}" == "" ]]; then
+                s_msg="${ME}: ERROR - Anything Java Standalone especified to get status.\n${s_msg}"
+                echo_failure "" "${s_msg}"; return 2
+        fi
+
+        # Verifying if file exist
+	s_conf="${CONFIG_PATH}/${s}/${s}.conf"
+	if [[ ! -f "${s_conf}" ]];then
+                s_msg="${ME}: ERROR - The Java Standalone's config '${s_conf}' don't exist.\n${s_msg}"
+                echo_failure "" "${s_msg}"; return 2
+        fi
+
+	# Verifying pid file
+	s_pid_file="${PID_PATH}/${s}.pid"
+	if [[ ! -f "${s_pid_file}" ]]; then
+		echo_failure "STOPPED" "${s_msg}"; return 1
+	else
+		s_pid="`cat "${s_pid_file}" 2>> /dev/null`"
+		if [[ "${?}" != "0" ]]; then
+			s_msg="${ME}: ERROR - Pid file '${s_pid_file}' can't be read or found.\n${s_msg}"
+			echo_failure "" "${s_msg}"; return 1
+		fi
+
+		if [[ "${s_pid}" == "" ]]; then
+			s_msg="${ME}: WARNI - Pid file '${s_pid_file}' exist but is empty, removing...\n${s_msg}"
+			rm -rf "${s_pid_file}" >/dev/null 2>&1
+			echo_failure "STOPPED" "${s_msg}"; return 1
+		elif [[ ! -d "/proc/${s_pid}" ]]; then
+			s_msg="${ME}: WARNI - The Jboss Server '${s}' isn't stopped properly.\n${s_msg}"
+			echo_failure "STOPPED" "${s_msg}"; return 1
+		else
+			echo_sucess "RUNNING" "${s_msg}"
+			return 0
+		fi
+	fi
+
+}
+
+
+function check(){
+	s="${1}"
+	s_msg=""
+	status "${s}"
+	echo -n "Reading conf of Java Standalone [${s}]:"
+	readConf "${s}"
+	echo -e "\n----------"
+	for v in ${VARS}; do
+		eval vv=\"\${"${v}"}\"
+		echo -e "${v} = ${vv}"
+	done
+	echo -e "----------\n\n"
+}
+
+
+
+#########################################################################
+
+# M A I N  function - Do the action                                     #
+
+#########################################################################
+
+main;
+[[ "${?}" == "2" ]] && exit -1
+case "${1}" in
+
+'list')
+	echo "Java Standalone: ${SERVERS}";
+	;;
+
+'start')
+	shift
+	if [[ "${#}" == "0" ]]; then
+		echo "${ME}: Starting all Standalone Java App(s), type any key to cancel."
+		read -t 3 -s -n 1 key
+		if [[ ! ( "${?}" != "0" ) ]]; then
+			echo "${ME}: Cancelling."
+		set --
+		else
+			eval set -- "${SERVERS}"
+		fi
+	fi
+	for s; do
+		[[ "${s}" == "" ]] && continue
+		start "${s}"
+	done
+	;;
+
+'stop')
+	shift
+	if [[ "${#}" == "0" ]]; then
+		echo "${ME}: Stopping allStandalone Java App(s), type any key to cancel."
+		read -t 3 -s -n 1 key
+		if [[ ! ( "${?}" != "0" ) ]]; then
+			echo "${ME}: Cancelling."
+			set --
+		else
+			eval set -- "${SERVERS}"
+		fi
+	fi
+	for s; do
+		[[ "${s}" == "" ]] && continue
+		stop "${s}"
+	done
+	;;
+
+'restart')
+	shift
+	if [[ "${#}" == "0" ]]; then
+		echo "${ME}: Restaring all Standalone Java App(s), type any key to cancel."
+		read -t 3 -s -n 1 key
+		if [[ ! ( "${?}" != "0" ) ]]; then
+			echo "${ME}: Cancelling."
+			set --
+		else
+			eval set -- "${SERVERS}"
+		fi
+	fi
+	for s; do
+		[[ "${s}" == "" ]] && continue
+		stop "${s}"
+		[[ "${?}" != "2" ]] && start "${s}"
+	done
+	;;
+
+'status')
+	shift
+	if [[ "${#}" == "0" ]]; then
+		echo "${ME}: Getting status for all Standalone Java Apps), type any key to cancel."
+		read -t 3 -s -n 1 key
+		if [[ ! ( "${?}" != "0" ) ]]; then
+			echo "${ME}: Cancelling."
+			set --
+		else
+			eval set -- "${SERVERS}"
+		fi
+	fi
+	for s; do 
+		[[ "${s}" == "" ]] && continue
+		status "${s}"
+	done
+	;;
+
+'check')
+	shift
+	if [[ "${#}" == "0" ]]; then
+                echo "${ME}: Checking all Standalone Java App(s), type any key to cancel."
+                read -t 3 -s -n 1 key
+                if [[ ! ( "${?}" != "0" ) ]]; then
+                        echo "${ME}: Cancelling."
+                        set --
+                else
+                        eval set -- "${SERVERS}"
+                fi
+        fi
+        for s; do
+                [[ "${s}" == "" ]] && continue
+                check "${s}"
+        done
+	;;
+'help')
+	usage
+	echo ""
+	help_config
+	;;
+'version')
+	echo "${ME}: Version '${VER}'"
+	;;
+*)
+	usage
+	;;
+esac
